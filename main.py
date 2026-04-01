@@ -27,19 +27,27 @@ class EEGTrainDataset(Dataset):
         return len(self.feats)
 
     def __getitem__(self, idx):
-        return self.feats[idx], self.labels[idx]
+        return (
+            torch.from_numpy(self.feats[idx]).float(),
+            torch.tensor(self.labels[idx], dtype=torch.long),
+        )
 
 
 class EEGTestDataset(Dataset):
     def __init__(self, dir: Path = DATA_DIR):
         self.feats = np.vstack([np.load(f)["test_data"] for f in dir.glob("*.npz")])
-        self.labels = np.vstack([np.load(f)["test_label"] for f in dir.glob("*.npz")])
+        self.labels = np.concatenate(
+            [np.load(f)["test_label"] for f in dir.glob("*.npz")]
+        )
 
     def __len__(self):
         return len(self.feats)
 
     def __getitem__(self, idx):
-        return self.feats[idx], self.labels[idx]
+        return (
+            torch.from_numpy(self.feats[idx]).float(),
+            torch.tensor(self.labels[idx], dtype=torch.long),
+        )
 
 
 # hyperparameters
@@ -116,7 +124,7 @@ if __name__ == "__main__":
         t_loss, t_acc = train_one_epoch(
             model,
             train_loader,
-            criterion=nn.CrossEntropyLoss,
+            criterion=nn.CrossEntropyLoss(),
             optimizer=optim.Adam(model.parameters(), lr=LEARNING_RATE),
         )
         v_loss, v_acc = evaluate(model, test_loader)
