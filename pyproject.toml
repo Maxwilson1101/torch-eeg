@@ -1,0 +1,25 @@
+[project]
+name = "torch-eeg"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.4.3",
+    "torch>=2.11.0",
+    "torchsummary>=1.5.1",
+    "tqdm>=4.66.5",
+    "wandb>=0.25.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
