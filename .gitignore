@@ -12,3 +12,4 @@ wheels/
 data/
 .ipynb_checkpoints/
 wandb/
+logs/
