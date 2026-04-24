@@ -25,7 +25,7 @@ class EEGDataset(Dataset):
         d = np.load(npz_file)
         data_key, label_key = self.KEYS[split]
 
-        self.data = d[data_key]
+        self.data = np.astype(d[data_key], np.float32)
         self.label = np.astype(d[label_key], np.int64)
 
     def __getitem__(self, idx: int) -> tuple[ArrayLike, ArrayLike]:
