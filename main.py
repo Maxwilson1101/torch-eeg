@@ -1,12 +1,13 @@
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch import optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from dataloader import EEGTrainDataset, EEGTestDataset
 
 # configs
 DATA_DIR = Path("data")
@@ -15,52 +16,18 @@ OUTPUT_SIZE = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# dataset
-class EEGTrainDataset(Dataset):
-    def __init__(self, dir: Path = DATA_DIR):
-        self.feats = np.vstack([np.load(f)["train_data"] for f in dir.glob("*.npz")])
-        self.labels = np.concatenate(
-            [np.load(f)["train_label"] for f in dir.glob("*.npz")]
-        )
-
-    def __len__(self):
-        return len(self.feats)
-
-    def __getitem__(self, idx):
-        return (
-            torch.from_numpy(self.feats[idx]).float(),
-            torch.tensor(self.labels[idx], dtype=torch.long),
-        )
-
-
-class EEGTestDataset(Dataset):
-    def __init__(self, dir: Path = DATA_DIR):
-        self.feats = np.vstack([np.load(f)["test_data"] for f in dir.glob("*.npz")])
-        self.labels = np.concatenate(
-            [np.load(f)["test_label"] for f in dir.glob("*.npz")]
-        )
-
-    def __len__(self):
-        return len(self.feats)
-
-    def __getitem__(self, idx):
-        return (
-            torch.from_numpy(self.feats[idx]).float(),
-            torch.tensor(self.labels[idx], dtype=torch.long),
-        )
-
-
 # hyperparameters
-BATCH_SIZE = 32
-LEARNING_RATE = 1e-3
-EPOCHS = 3
+LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-5
+LABEL_SMOOTHING = 0.1
+EPOCHS = 2
 
 mlp_baseline = nn.Sequential(
     nn.Linear(INPUT_SIZE, 128),
     nn.Dropout(0.5),
     nn.ReLU(),
     nn.Linear(128, OUTPUT_SIZE),
-).to(DEVICE)
+)
 
 
 def train_one_epoch(
@@ -110,25 +77,33 @@ def evaluate(
 
 
 if __name__ == "__main__":
-    train_data = EEGTrainDataset()
-    test_data = EEGTestDataset()
-    train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
-
-    model = mlp_baseline
-
-    print("Start training...")
     print(f"Using device: {DEVICE}")
 
-    for epoch in range(1, EPOCHS + 1):
-        t_loss, t_acc = train_one_epoch(
-            model,
-            train_loader,
-            criterion=nn.CrossEntropyLoss(),
-            optimizer=optim.Adam(model.parameters(), lr=LEARNING_RATE),
-        )
-        v_loss, v_acc = evaluate(model, test_loader)
-        print(
-            f"Epoch {epoch}: train_loss={t_loss:.4f} train_acc={t_acc:.4f} | "
-            f"val_loss={v_loss:.4f}  val_acc={v_acc:.4f}"
-        )
+    for f in DATA_DIR.glob("*.npz"):
+        train_data = EEGTrainDataset(f)
+        test_data = EEGTestDataset(f)
+        train_loader = DataLoader(train_data, shuffle=True)
+        test_loader = DataLoader(test_data, shuffle=False)
+
+        model = mlp_baseline.to(DEVICE)
+
+        print(f"Start training {f.name}...")
+
+        for epoch in range(1, EPOCHS + 1):
+            t_loss, t_acc = train_one_epoch(
+                model,
+                train_loader,
+                criterion=nn.CrossEntropyLoss(
+                    label_smoothing=LABEL_SMOOTHING,
+                ),
+                optimizer=optim.Adam(
+                    model.parameters(),
+                    lr=LEARNING_RATE,
+                    weight_decay=WEIGHT_DECAY,
+                ),
+            )
+            v_loss, v_acc = evaluate(model, test_loader)
+            print(
+                f"Epoch {epoch}: train_loss={t_loss:.4f} train_acc={t_acc:.4f} "
+                f"val_loss={v_loss:.4f}  val_acc={v_acc:.4f}"
+            )
