@@ -1,14 +1,123 @@
-# EEG Classification
+# EEG Emotion Classification
 
-**数据集介绍**：本次作业要求使⽤卷积神经⽹络（CNN）实现多类情绪的分类。本次作业使⽤的数据集是⼀个五类情绪分类任务。数据集共 16 名被试，数据形状为 N*62*5，N 指样本数，62 指电极导联数，5 指脑电的 5 个频段。我们提供的特征为微分熵(DE)频域特征。脑电电极顺序⽂件： Channel Order.xlsx，脑电电极位置⽂件： channel_62_pos.locs
+5-class emotion classification on SEED-IV style EEG data using CNNs.  
+Two evaluation protocols: **subject-dependent** (16 independent models) and **cross-subject LOOCV** (leave-one-out across 16 subjects).
 
-被试依赖条件下，为每名被试单独训练模型。即⼀共训练 16 个模型，最终结果取平均准确率；跨被试条件下，需要将每个被试的所有实验数据拼接进⾏留⼀交叉验证，每次取 15 名被试做训练集，1 名被试做测试集，直到所有被试都轮流被当作测试集，最终取平均准确率。
+---
 
-**实验要求**：1.在给定的数据集上，使⽤卷积神经⽹络实现被试依赖和跨被试的五类情绪分类任务。2.通过 t-SNE 可视化不同被试数据分布观察被试数据分布的差异性。
-评分标准：实验报告中是否包含了所要求的实验结果，实验结果是否合理，是否有适当的实验结果分析，实验报告的规范程度。
+## Data
 
-**作业要求**：需要提交实验报告和代码（代码实现允许调第三⽅库），实验报告推荐使⽤ PDF格式，请将所有需要提交的⽂件打包成压缩包，命名格式为“姓名_学号_第⼆次作业”，并于4 ⽉ 27 ⽇ 23:59 前提交⾄ canvas 平台。
+### Format
 
-TIPS: 可以使⽤ python MNE 或者 eeglab ⼯具包画脑壳图(torch-eeg) 
+Each subject's data is stored as a `.npz` file under `data/` named `{1..16}.npz`.
 
-HINT: 样本具有 temporal 信息，在一个 npz 文件中，相同的 label 会连续出现，这是一个 trial，表示在这段时间中采集到的情绪 label。假设 trial 和 trial 之间独立。
+| Key | Shape | dtype | Description |
+|---|---|---|---|
+| `train_data` | `(N_train, 310)` | float32 | Flattened DE features, reshaped to `(N, 62, 5)` |
+| `train_label` | `(N_train,)` | int64 | Emotion class 0–4 |
+| `test_data` | `(N_test, 310)` | float32 | Same format |
+| `test_label` | `(N_test,)` | int64 | Emotion class 0–4 |
+
+After loading, `EEGDataset` reshapes each sample to `(62, 5)`:
+- **62** — EEG electrode channels (62-lead cap, positions in `channel_62_pos.locs`)
+- **5** — Differential entropy (DE) features over 5 frequency bands: δ (1–4 Hz), θ (4–8 Hz), α (8–13 Hz), β (13–30 Hz), γ (30–50 Hz)
+
+### Labels
+
+| Class | Emotion |
+|---|---|
+| 0 | Neutral |
+| 1 | Sad |
+| 2 | Fear |
+| 3 | Happy |
+| 4 | Disgust |
+
+### Temporal structure
+
+Within each `.npz` file, samples sharing the same label appear consecutively — each contiguous block is one **trial** (a continuous EEG segment recorded during a single emotional stimulus). Trials are assumed independent of each other.
+
+### Electrode layout
+
+- Channel ordering: `Channel Order.xlsx`
+- Electrode positions (angle, radius in polar coords): `channel_62_pos.locs`
+- Format: `index  angle  radius  name` (one electrode per line)
+
+The `TopoCNN` model uses `channel_62_pos.locs` to project channels onto a 9×9 scalp topology grid.
+
+---
+
+## Models
+
+Three CNN architectures are implemented in `models.py`:
+
+| Model | Params | Description |
+|---|---|---|
+| `BandSpatialCNN` | ~146K | TSception-inspired; parallel band kernels + spatial branches |
+| `TopoCNN` | ~95K | Projects electrodes onto 9×9 topology grid, then 2D CNN |
+| `FactorizedCNN` | ~9K | EEGNet-inspired depthwise-separable 1D conv |
+
+The `EEGMLP` baseline (bilinear projection head) is also in `main.py`.
+
+---
+
+## Training
+
+### Setup
+
+```bash
+uv sync
+```
+
+### Subject-dependent (16 models)
+
+Trains one model per subject, averages accuracy and macro-F1 across all 16:
+
+```bash
+uv run python main.py
+```
+
+Logs are written to `logs/` and also printed to the console.  
+To swap the model, edit the `model = EEGMLP(12, 3).to(DEVICE)` line in `main.py` (replace with `BandSpatialCNN()`, `TopoCNN()`, or `FactorizedCNN()`).
+
+### Cross-subject LOOCV
+
+The `run_loocv()` function is defined in `main.py` but **not called automatically**. To run it:
+
+```python
+# in a script or notebook
+from pathlib import Path
+from main import run_loocv, DATA_DIR
+
+all_files = sorted(DATA_DIR.glob("*.npz"), key=lambda p: int(p.stem))
+run_loocv(all_files)
+```
+
+Each fold trains on all 15 other subjects (train + test splits concatenated) and evaluates on the held-out subject.
+
+### Key hyperparameters
+
+| Name | Default | Location |
+|---|---|---|
+| `LEARNING_RATE` | `1e-4` | `main.py` |
+| `WEIGHT_DECAY` | `1e-4` | `main.py` |
+| `LABEL_SMOOTHING` | `0.1` | `main.py` |
+| `EPOCHS` | `2` | `main.py` |
+| `BATCH_SIZE` | `32` | `main.py` |
+
+---
+
+## Tests
+
+Smoke tests (output shape + backward pass) for all three CNN models:
+
+```bash
+uv run pytest tests/test_models.py -v
+```
+
+---
+
+## Notes
+
+- Electrode scalp maps can be visualized with [MNE-Python](https://mne.tools) or EEGLAB using `channel_62_pos.locs`.
+- t-SNE visualization of subject data distributions is recommended to observe cross-subject variability.
+- Submission deadline: **2026-04-27 23:59** via Canvas — pack as `姓名_学号_第二次作业.zip`.

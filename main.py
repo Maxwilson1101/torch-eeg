@@ -6,7 +6,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch import optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
+from sklearn.metrics import f1_score as sklearn_f1
 from tqdm import tqdm
 
 from dataloader import EEGDataset
@@ -18,20 +19,12 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 logger = logging.getLogger(__name__)
 
-
 # hyperparameters
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 LABEL_SMOOTHING = 0.1
 EPOCHS = 2
-
-mlp_baseline = nn.Sequential(
-    nn.Flatten(1, -1),
-    nn.Linear(62 * 5, 128),
-    nn.Dropout(0.5),
-    nn.ReLU(),
-    nn.Linear(128, 5),
-)
+BATCH_SIZE = 32
 
 
 class EEGMLP(nn.Module):
@@ -81,7 +74,7 @@ def train_one_epoch(
     return total_loss / size, total_acc / size
 
 
-@torch.no_grad
+@torch.no_grad()
 def evaluate(
     model: nn.Module,
     test_data: DataLoader,
@@ -89,6 +82,7 @@ def evaluate(
 ):
     model.eval()
     size, total_acc, total_loss = 0, 0, 0.0
+    all_preds, all_labels = [], []
 
     for X, y in test_data:
         X, y = X.to(device), y.to(device)
@@ -99,46 +93,107 @@ def evaluate(
         preds = logits.argmax(dim=1)
         total_acc += (preds == y).sum().item()
         size += X.size(0)
+        all_preds.extend(preds.cpu().tolist())
+        all_labels.extend(y.cpu().tolist())
 
-    return total_loss / size, total_acc / size
+    f1 = sklearn_f1(all_labels, all_preds, average="macro", zero_division=0)
+    return total_loss / size, total_acc / size, f1
+
+
+def run_loocv(all_files, device=DEVICE, epochs=EPOCHS, batch_size=BATCH_SIZE):
+    """Leave-one-out cross-validation across subjects.
+
+    DO NOT CALL from __main__. Run explicitly when needed.
+    """
+    loocv_accs, loocv_f1s = [], []
+    for i, test_file in enumerate(all_files):
+        train_ds = ConcatDataset(
+            [EEGDataset(f, s) for j, f in enumerate(all_files) if j != i for s in ("train", "test")]
+        )
+        test_ds = ConcatDataset([EEGDataset(test_file, s) for s in ("train", "test")])
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+
+        model = EEGMLP(12, 3).to(device)
+        criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+        for epoch in range(1, epochs + 1):
+            t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+            v_loss, v_acc, v_f1 = evaluate(model, test_loader, device)
+            logger.info(
+                "LOOCV fold %d epoch %d: train_loss=%.4f train_acc=%.4f "
+                "val_loss=%.4f val_acc=%.4f val_f1=%.4f",
+                i, epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
+            )
+
+        loocv_accs.append(v_acc)
+        loocv_f1s.append(v_f1)
+        logger.info("LOOCV fold %d (%s): acc=%.4f f1=%.4f", i, test_file.stem, v_acc, v_f1)
+
+    import statistics
+    logger.info(
+        "LOOCV FINAL: acc=%.4f±%.4f f1=%.4f±%.4f",
+        sum(loocv_accs) / len(loocv_accs),
+        statistics.stdev(loocv_accs),
+        sum(loocv_f1s) / len(loocv_f1s),
+        statistics.stdev(loocv_f1s),
+    )
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        filename=LOG_DIR / f"{datetime.now().strftime('%Y%d%m%H%M%S')}.log",
-        level=logging.DEBUG,
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / f"{datetime.now().strftime('%Y%d%m%H%M%S')}.log"
+
+    file_handler = logging.FileHandler(log_path)
+    console_handler = logging.StreamHandler()
+    fmt = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", "%H:%M:%S")
+    file_handler.setFormatter(fmt)
+    console_handler.setFormatter(fmt)
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
+    logger.info(
+        "Hyperparameters: lr=%s wd=%s label_smoothing=%s epochs=%d batch_size=%d",
+        LEARNING_RATE, WEIGHT_DECAY, LABEL_SMOOTHING, EPOCHS, BATCH_SIZE,
     )
+    logger.info("Using device: %s", DEVICE)
 
-    logger.debug(f"Using device: {DEVICE}")
+    all_files = sorted(DATA_DIR.glob("*.npz"), key=lambda p: int(p.stem))
+    subj_accs, subj_f1s = [], []
 
-    for f in DATA_DIR.glob("*.npz"):
+    for f in all_files:
         train_data = EEGDataset(f, split="train")
         test_data = EEGDataset(f, split="test")
-        train_loader = DataLoader(train_data, shuffle=True)
-        test_loader = DataLoader(test_data, shuffle=False)
+        train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+        test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
 
         model = EEGMLP(12, 3).to(DEVICE)
-        # model = mlp_baseline.to(DEVICE)
-        for name, p in model.named_parameters():
-            print(name, p.shape)
+        criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-        logger.info(f"Start training {f.name}")
+        logger.info("Start training %s", f.name)
 
         for epoch in range(1, EPOCHS + 1):
-            t_loss, t_acc = train_one_epoch(
-                model,
-                train_loader,
-                criterion=nn.CrossEntropyLoss(
-                    label_smoothing=LABEL_SMOOTHING,
-                ),
-                optimizer=optim.Adam(
-                    model.parameters(),
-                    lr=LEARNING_RATE,
-                    weight_decay=WEIGHT_DECAY,
-                ),
-            )
-            v_loss, v_acc = evaluate(model, test_loader)
+            t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer)
+            v_loss, v_acc, v_f1 = evaluate(model, test_loader)
             logger.info(
-                f"Epoch {epoch}: train_loss={t_loss:.4f} train_acc={t_acc:.4f} "
-                f"val_loss={v_loss:.4f}  val_acc={v_acc:.4f}"
+                "Epoch %d: train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f",
+                epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
             )
+
+        subj_accs.append(v_acc)
+        subj_f1s.append(v_f1)
+        logger.info("Subject %s: acc=%.4f f1=%.4f", f.stem, v_acc, v_f1)
+
+    if subj_accs:
+        import statistics
+        logger.info(
+            "Subject-dep FINAL: acc=%.4f±%.4f f1=%.4f±%.4f",
+            sum(subj_accs) / len(subj_accs),
+            statistics.stdev(subj_accs) if len(subj_accs) > 1 else 0.0,
+            sum(subj_f1s) / len(subj_f1s),
+            statistics.stdev(subj_f1s) if len(subj_f1s) > 1 else 0.0,
+        )
