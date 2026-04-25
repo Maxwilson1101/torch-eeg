@@ -1,4 +1,6 @@
+import argparse
 import logging
+import statistics
 from datetime import datetime
 from pathlib import Path
 
@@ -13,27 +15,38 @@ from tqdm import tqdm
 from dataloader import EEGDataset
 from models import BandSpatialCNN, TopoCNN, FactorizedCNN
 
-# configs
 DATA_DIR = Path("data")
 LOG_DIR = Path("logs")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 logger = logging.getLogger(__name__)
 
-# hyperparameters
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 LABEL_SMOOTHING = 0.1
 EPOCHS = 2
 BATCH_SIZE = 32
 
-mlp_baseline = nn.Sequential(
-    nn.Flatten(1, -1),
-    nn.Linear(62 * 5, 128),
-    nn.Dropout(0.5),
-    nn.ReLU(),
-    nn.Linear(128, 5),
-)
+MODEL_CHOICES = ["mlp", "band", "topo", "factorized"]
+MODE_CHOICES = ["per-subject", "loocv"]
+
+
+def build_model(name: str) -> nn.Module:
+    if name == "mlp":
+        return nn.Sequential(
+            nn.Flatten(1, -1),
+            nn.Linear(62 * 5, 128),
+            nn.Dropout(0.5),
+            nn.ReLU(),
+            nn.Linear(128, 5),
+        )
+    if name == "band":
+        return BandSpatialCNN()
+    if name == "topo":
+        return TopoCNN()
+    if name == "factorized":
+        return FactorizedCNN()
+    raise ValueError(f"Unknown model: {name}")
 
 
 def train_one_epoch(
@@ -88,12 +101,62 @@ def evaluate(
     return total_loss / size, total_acc / size, f1
 
 
-def run_loocv(all_files, device=DEVICE, epochs=EPOCHS, batch_size=BATCH_SIZE):
-    """Leave-one-out cross-validation across subjects.
+def run_per_subject(
+    all_files: list,
+    model_name: str,
+    device: torch.device = DEVICE,
+    epochs: int = EPOCHS,
+    batch_size: int = BATCH_SIZE,
+):
+    subj_accs, subj_f1s = [], []
 
-    DO NOT CALL from __main__. Run explicitly when needed.
-    """
+    for f in all_files:
+        train_loader = DataLoader(
+            EEGDataset(f, split="train"), batch_size=batch_size, shuffle=True
+        )
+        test_loader = DataLoader(
+            EEGDataset(f, split="test"), batch_size=batch_size, shuffle=False
+        )
+
+        model = build_model(model_name).to(device)
+        criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+        optimizer = optim.Adam(
+            model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+        )
+
+        logger.info("Start training %s", f.name)
+        v_acc, v_f1 = 0.0, 0.0
+        for epoch in range(1, epochs + 1):
+            t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+            v_loss, v_acc, v_f1 = evaluate(model, test_loader, device)
+            logger.info(
+                "Epoch %d: train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f",
+                epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
+            )
+
+        subj_accs.append(v_acc)
+        subj_f1s.append(v_f1)
+        logger.info("Subject %s: acc=%.4f f1=%.4f", f.stem, v_acc, v_f1)
+
+    if subj_accs:
+        logger.info(
+            "Subject-dep FINAL: acc=%.4f±%.4f f1=%.4f±%.4f",
+            sum(subj_accs) / len(subj_accs),
+            statistics.stdev(subj_accs) if len(subj_accs) > 1 else 0.0,
+            sum(subj_f1s) / len(subj_f1s),
+            statistics.stdev(subj_f1s) if len(subj_f1s) > 1 else 0.0,
+        )
+
+
+def run_loocv(
+    all_files: list,
+    model_name: str,
+    device: torch.device = DEVICE,
+    epochs: int = EPOCHS,
+    batch_size: int = BATCH_SIZE,
+):
     loocv_accs, loocv_f1s = [], []
+
     for i, test_file in enumerate(all_files):
         train_ds = ConcatDataset(
             [
@@ -107,36 +170,25 @@ def run_loocv(all_files, device=DEVICE, epochs=EPOCHS, batch_size=BATCH_SIZE):
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
         test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
-        model = mlp_baseline.to(device)
+        model = build_model(model_name).to(device)
         criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
         optimizer = optim.Adam(
             model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
         )
 
+        v_acc, v_f1 = 0.0, 0.0
         for epoch in range(1, epochs + 1):
-            t_loss, t_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, device
-            )
+            t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
             v_loss, v_acc, v_f1 = evaluate(model, test_loader, device)
             logger.info(
                 "LOOCV fold %d epoch %d: train_loss=%.4f train_acc=%.4f "
                 "val_loss=%.4f val_acc=%.4f val_f1=%.4f",
-                i,
-                epoch,
-                t_loss,
-                t_acc,
-                v_loss,
-                v_acc,
-                v_f1,
+                i, epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
             )
 
         loocv_accs.append(v_acc)
         loocv_f1s.append(v_f1)
-        logger.info(
-            "LOOCV fold %d (%s): acc=%.4f f1=%.4f", i, test_file.stem, v_acc, v_f1
-        )
-
-    import statistics
+        logger.info("LOOCV fold %d (%s): acc=%.4f f1=%.4f", i, test_file.stem, v_acc, v_f1)
 
     logger.info(
         "LOOCV FINAL: acc=%.4f±%.4f f1=%.4f±%.4f",
@@ -148,8 +200,14 @@ def run_loocv(all_files, device=DEVICE, epochs=EPOCHS, batch_size=BATCH_SIZE):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=MODE_CHOICES, default="per-subject")
+    parser.add_argument("--model", choices=MODEL_CHOICES, default="mlp")
+    args = parser.parse_args()
+
     LOG_DIR.mkdir(exist_ok=True)
-    log_path = LOG_DIR / f"{datetime.now().strftime('%Y%d%m%H%M%S')}.log"
+    timestamp = datetime.now().strftime("%Y%d%m%H%M%S")
+    log_path = LOG_DIR / f"{timestamp}_{args.model}_{args.mode}.log"
 
     file_handler = logging.FileHandler(log_path)
     console_handler = logging.StreamHandler()
@@ -163,55 +221,13 @@ if __name__ == "__main__":
 
     logger.info(
         "Hyperparameters: lr=%s wd=%s label_smoothing=%s epochs=%d batch_size=%d",
-        LEARNING_RATE,
-        WEIGHT_DECAY,
-        LABEL_SMOOTHING,
-        EPOCHS,
-        BATCH_SIZE,
+        LEARNING_RATE, WEIGHT_DECAY, LABEL_SMOOTHING, EPOCHS, BATCH_SIZE,
     )
-    logger.info("Using device: %s", DEVICE)
+    logger.info("Using device: %s  mode: %s  model: %s", DEVICE, args.mode, args.model)
 
     all_files = sorted(DATA_DIR.glob("*.npz"), key=lambda p: int(p.stem))
-    subj_accs, subj_f1s = [], []
 
-    for f in all_files:
-        train_data = EEGDataset(f, split="train")
-        test_data = EEGDataset(f, split="test")
-        train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
-        test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
-
-        model = mlp_baseline.to(DEVICE)
-        criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-        optimizer = optim.Adam(
-            model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
-        )
-
-        logger.info("Start training %s", f.name)
-
-        for epoch in range(1, EPOCHS + 1):
-            t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer)
-            v_loss, v_acc, v_f1 = evaluate(model, test_loader)
-            logger.info(
-                "Epoch %d: train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f",
-                epoch,
-                t_loss,
-                t_acc,
-                v_loss,
-                v_acc,
-                v_f1,
-            )
-
-        subj_accs.append(v_acc)
-        subj_f1s.append(v_f1)
-        logger.info("Subject %s: acc=%.4f f1=%.4f", f.stem, v_acc, v_f1)
-
-    if subj_accs:
-        import statistics
-
-        logger.info(
-            "Subject-dep FINAL: acc=%.4f±%.4f f1=%.4f±%.4f",
-            sum(subj_accs) / len(subj_accs),
-            statistics.stdev(subj_accs) if len(subj_accs) > 1 else 0.0,
-            sum(subj_f1s) / len(subj_f1s),
-            statistics.stdev(subj_f1s) if len(subj_f1s) > 1 else 0.0,
-        )
+    if args.mode == "per-subject":
+        run_per_subject(all_files, args.model)
+    else:
+        run_loocv(all_files, args.model)
