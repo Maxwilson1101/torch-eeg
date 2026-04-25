@@ -11,6 +11,7 @@ from sklearn.metrics import f1_score as sklearn_f1
 from tqdm import tqdm
 
 from dataloader import EEGDataset
+from models import BandSpatialCNN, TopoCNN, FactorizedCNN
 
 # configs
 DATA_DIR = Path("data")
@@ -26,26 +27,13 @@ LABEL_SMOOTHING = 0.1
 EPOCHS = 2
 BATCH_SIZE = 32
 
-
-class EEGMLP(nn.Module):
-    CHAN_SIZE = 62
-    BAND_SIZE = 5
-
-    def __init__(self, w_chan: int, w_band: int):
-        super().__init__()
-        self.proj_band = nn.Parameter(torch.empty(self.BAND_SIZE, w_band))
-        self.proj_chan = nn.Parameter(torch.empty(self.CHAN_SIZE, w_chan))
-        nn.init.xavier_normal_(self.proj_band)
-        nn.init.xavier_normal_(self.proj_chan)
-        self.head = nn.Sequential(
-            nn.Flatten(1, -1),
-            nn.Linear(w_band * w_chan, 5),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x @ self.proj_band  # (batch, 62, w_band)
-        x = x.transpose(1, 2) @ self.proj_chan  # (batch, w_band, w_chan)
-        return self.head(x)
+mlp_baseline = nn.Sequential(
+    nn.Flatten(1, -1),
+    nn.Linear(62 * 5, 128),
+    nn.Dropout(0.5),
+    nn.ReLU(),
+    nn.Linear(128, 5),
+)
 
 
 def train_one_epoch(
@@ -108,30 +96,48 @@ def run_loocv(all_files, device=DEVICE, epochs=EPOCHS, batch_size=BATCH_SIZE):
     loocv_accs, loocv_f1s = [], []
     for i, test_file in enumerate(all_files):
         train_ds = ConcatDataset(
-            [EEGDataset(f, s) for j, f in enumerate(all_files) if j != i for s in ("train", "test")]
+            [
+                EEGDataset(f, s)
+                for j, f in enumerate(all_files)
+                if j != i
+                for s in ("train", "test")
+            ]
         )
         test_ds = ConcatDataset([EEGDataset(test_file, s) for s in ("train", "test")])
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
         test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
-        model = EEGMLP(12, 3).to(device)
+        model = mlp_baseline.to(device)
         criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        optimizer = optim.Adam(
+            model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+        )
 
         for epoch in range(1, epochs + 1):
-            t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+            t_loss, t_acc = train_one_epoch(
+                model, train_loader, criterion, optimizer, device
+            )
             v_loss, v_acc, v_f1 = evaluate(model, test_loader, device)
             logger.info(
                 "LOOCV fold %d epoch %d: train_loss=%.4f train_acc=%.4f "
                 "val_loss=%.4f val_acc=%.4f val_f1=%.4f",
-                i, epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
+                i,
+                epoch,
+                t_loss,
+                t_acc,
+                v_loss,
+                v_acc,
+                v_f1,
             )
 
         loocv_accs.append(v_acc)
         loocv_f1s.append(v_f1)
-        logger.info("LOOCV fold %d (%s): acc=%.4f f1=%.4f", i, test_file.stem, v_acc, v_f1)
+        logger.info(
+            "LOOCV fold %d (%s): acc=%.4f f1=%.4f", i, test_file.stem, v_acc, v_f1
+        )
 
     import statistics
+
     logger.info(
         "LOOCV FINAL: acc=%.4f±%.4f f1=%.4f±%.4f",
         sum(loocv_accs) / len(loocv_accs),
@@ -157,7 +163,11 @@ if __name__ == "__main__":
 
     logger.info(
         "Hyperparameters: lr=%s wd=%s label_smoothing=%s epochs=%d batch_size=%d",
-        LEARNING_RATE, WEIGHT_DECAY, LABEL_SMOOTHING, EPOCHS, BATCH_SIZE,
+        LEARNING_RATE,
+        WEIGHT_DECAY,
+        LABEL_SMOOTHING,
+        EPOCHS,
+        BATCH_SIZE,
     )
     logger.info("Using device: %s", DEVICE)
 
@@ -170,9 +180,11 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
         test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
 
-        model = EEGMLP(12, 3).to(DEVICE)
+        model = mlp_baseline.to(DEVICE)
         criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        optimizer = optim.Adam(
+            model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+        )
 
         logger.info("Start training %s", f.name)
 
@@ -181,7 +193,12 @@ if __name__ == "__main__":
             v_loss, v_acc, v_f1 = evaluate(model, test_loader)
             logger.info(
                 "Epoch %d: train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f",
-                epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
+                epoch,
+                t_loss,
+                t_acc,
+                v_loss,
+                v_acc,
+                v_f1,
             )
 
         subj_accs.append(v_acc)
@@ -190,6 +207,7 @@ if __name__ == "__main__":
 
     if subj_accs:
         import statistics
+
         logger.info(
             "Subject-dep FINAL: acc=%.4f±%.4f f1=%.4f±%.4f",
             sum(subj_accs) / len(subj_accs),
