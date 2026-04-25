@@ -29,7 +29,7 @@ class EEGDataset(Dataset):
         self.label = np.astype(d[label_key], np.int64)
 
     def __getitem__(self, idx: int) -> tuple[ArrayLike, ArrayLike]:
-        return self.data[idx], self.label[idx]
+        return self.data[idx].reshape((62, 5)), self.label[idx]
 
     def __len__(self) -> int:
         return len(self.data)
@@ -40,6 +40,6 @@ if __name__ == "__main__":
 
     ROOT = Path("data")
     ds = EEGDataset(ROOT / "1.npz")
-    pprint(ds)
 
-    pprint(ds[0])
+    for _, label in ds:
+        print(label)
