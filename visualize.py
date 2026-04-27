@@ -26,7 +26,7 @@ def build_mne_info() -> mne.Info:
         name = parts[3]
         x = radius * sin(radians(angle)) * HEAD_RADIUS
         y = radius * cos(radians(angle)) * HEAD_RADIUS
-        z = sqrt(max(0.0, 1.0 - radius ** 2)) * HEAD_RADIUS
+        z = sqrt(max(0.0, 1.0 - radius**2)) * HEAD_RADIUS
         ch_names.append(name)
         ch_pos[name] = np.array([x, y, z])
 
@@ -38,12 +38,14 @@ def build_mne_info() -> mne.Info:
 
 def plot_subject(npz_path: Path, info: mne.Info, fig_dir: Path) -> None:
     data = np.load(npz_path)
-    mean_de = data["mean_de"]   # (5, 62, 5): class, channel, band
+    mean_de = data["mean_de"]  # (5, 62, 5): class, channel, band
     acc = float(data["acc"])
     f1 = float(data["f1"])
 
     fig, axes = plt.subplots(
-        5, 5, figsize=(16, 14),
+        5,
+        5,
+        figsize=(16, 14),
         gridspec_kw={"hspace": 0.5, "wspace": 0.1},
     )
     fig.suptitle(f"{npz_path.stem}  acc={acc:.3f}  f1={f1:.3f}", fontsize=13)
@@ -56,7 +58,8 @@ def plot_subject(npz_path: Path, info: mne.Info, fig_dir: Path) -> None:
             ax = axes[cls_idx][band_idx]
             values = mean_de[cls_idx, :, band_idx]  # (62,)
             mne.viz.plot_topomap(
-                values, info,
+                values,
+                info,
                 axes=ax,
                 show=False,
                 contours=4,
@@ -65,7 +68,9 @@ def plot_subject(npz_path: Path, info: mne.Info, fig_dir: Path) -> None:
             if cls_idx == 0:
                 ax.set_title(band_name, fontsize=10)
             if band_idx == 0:
-                ax.set_ylabel(cls_name, fontsize=9, rotation=0, labelpad=40, va="center")
+                ax.set_ylabel(
+                    cls_name, fontsize=9, rotation=0, labelpad=40, va="center"
+                )
 
     fig_dir.mkdir(parents=True, exist_ok=True)
     out = fig_dir / f"{npz_path.stem}_topomap.png"
@@ -76,24 +81,28 @@ def plot_subject(npz_path: Path, info: mne.Info, fig_dir: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["per_subject", "loocv"], default="per_subject")
-    parser.add_argument("--subject", default="all",
-                        help="Subject stem (e.g. '3') or 'all'")
+    parser.add_argument(
+        "--mode", choices=["per-subject", "loocv"], default="per-subject"
+    )
+    parser.add_argument(
+        "--subject", default="all", help="Subject stem (e.g. '3') or 'all'"
+    )
     args = parser.parse_args()
 
     mne.set_log_level("WARNING")
     info = build_mne_info()
 
-    npz_dir = OUT_DIR / args.mode
+    mode_dir = args.mode.replace("-", "_")
+    npz_dir = OUT_DIR / mode_dir
     if not npz_dir.exists():
         raise FileNotFoundError(f"No outputs found at {npz_dir}. Run main.py first.")
 
-    fig_dir = OUT_DIR / "figures" / args.mode
+    fig_dir = OUT_DIR / "figures" / mode_dir
 
     if args.subject == "all":
         files = sorted(npz_dir.glob("*.npz"))
     else:
-        stem = args.subject if args.mode == "per_subject" else f"fold_{args.subject}"
+        stem = args.subject if args.mode == "per-subject" else f"fold_{args.subject}"
         files = [npz_dir / f"{stem}.npz"]
 
     if not files:
