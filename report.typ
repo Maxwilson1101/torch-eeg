@@ -206,6 +206,12 @@ Best-performing fold: S13 (accuracy = 70.05%). Worst-performing fold: S6 (accura
 
 Training on all subjects exhibited rapid convergence: training accuracy reached ≥ 99.9% by epoch 2, while validation loss continued to increase monotonically. This divergence between training and validation performance is a clear indicator of severe overfitting within the 2-epoch training window. While label smoothing and L2 regularization provide partial constraints, they prove insufficient to prevent memorization at this learning rate and batch size. The model's effective capacity exceeds the regularization imposed by these modest penalties.
 
+#figure(
+  image("outputs/figures/training_20262704111218_band_loocv.png")
+)
+
+Each panel shows train loss (blue solid), val loss (blue dashed), train acc (red solid), val acc (red dashed). The universal pattern of converging train loss with diverging val loss confirms overfitting across all folds.
+
 == Subject-Specific Outliers
 
 Three subjects consistently underperformed across both protocols:
@@ -221,6 +227,10 @@ Three subjects consistently underperformed across both protocols:
   ),
 )
 
+#figure(
+  image("outputs/figures/per_subject/9_topomap.png")
+)
+
 A critical observation: in subject-dependent mode, these subjects achieve moderate accuracy (range: 50.64%-72.44%), suggesting the model can partially adapt to their individual distributions when trained on their own data. By contrast, in LOOCV, cross-subject models fail substantially (range: 31.71%-34.06%). This asymmetry indicates that their differential entropy feature distributions lie outside the convex hull of the training set (the 15 other subjects), rendering them distributional outliers.
 
 Potential root causes include: (1) natural variation in emotional expressivity and proprioception; (2) electrode contact quality or impedance variation; (3) systematic differences in subjective emotion labeling for those recording sessions; or (4) transient physiological states (fatigue, attention) during data collection. Resolving such outliers would benefit from data quality audits and domain adaptation techniques tailored to individual differences.
@@ -228,6 +238,10 @@ Potential root causes include: (1) natural variation in emotional expressivity a
 == Inter-Subject Heterogeneity
 
 The per-subject standard deviation of $±13.82$ pp (subject-dependent) and $±11.32$ pp (LOOCV) is large relative to the respective means. This high variability reflects genuine between-subject heterogeneity in EEG-based emotion representation rather than model instability, as the training loss trajectories remain consistent across all subjects and folds. The observed variance aligns with well-established findings in affective neuroscience: individual differences in anterior-posterior alpha asymmetry, theta-gamma coupling, and hemispheric dominance for emotion processing are substantial and stable within subjects but variable across populations.
+
+#figure(
+  image("outputs/figures/loocv/fold_13_topomap.png")
+)
 
 = Discussion
 
