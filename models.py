@@ -59,7 +59,7 @@ class BandSpatialCNN(nn.Module):
 
 def _compute_grid_indices() -> torch.Tensor:
     """Read channel_62_pos.locs and map each electrode to a flat 9×9 grid index."""
-    locs_path = Path(__file__).parent / "channel_62_pos.locs"
+    locs_path = Path(__file__).parent / "data" / "channel_62_pos.locs"
     xs, ys = [], []
     for line in locs_path.read_text().splitlines():
         parts = line.split()
@@ -148,3 +148,102 @@ class FactorizedCNN(nn.Module):
         x = self.pool(x)        # (B, pointwise_filters, 1)
         x = x.flatten(1)        # (B, pointwise_filters)
         return self.head(x)
+
+
+# ---------------------------------------------------------------------------
+# BandGraphCNN  (BandSpatialCNN band stage + GCN spatial refinement)
+# Input: (B, 62, 5)
+# ---------------------------------------------------------------------------
+
+def _build_adjacency(threshold: float = 0.35) -> torch.Tensor:
+    """Gaussian-weighted, symmetrically-normalized adjacency from channel_62_pos.locs."""
+    locs_path = Path(__file__).parent / "data" / "channel_62_pos.locs"
+    xs, ys = [], []
+    for line in locs_path.read_text().splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        angle = float(parts[1])
+        radius = float(parts[2])
+        xs.append(radius * sin(radians(angle)))
+        ys.append(radius * cos(radians(angle)))
+
+    coords = torch.tensor(list(zip(xs, ys)), dtype=torch.float32)  # (62, 2)
+    diff = coords.unsqueeze(0) - coords.unsqueeze(1)               # (62, 62, 2)
+    dist = diff.norm(dim=-1)                                        # (62, 62)
+
+    sigma = dist[dist > 0].std().item()
+    adj = torch.exp(-dist.pow(2) / sigma ** 2)
+    adj[dist > threshold] = 0.0
+
+    adj = adj + torch.eye(len(xs))
+    deg = adj.sum(dim=1)
+    deg_inv_sqrt = deg.pow(-0.5)
+    return deg_inv_sqrt.unsqueeze(1) * adj * deg_inv_sqrt.unsqueeze(0)  # (62, 62)
+
+
+class GraphConv(nn.Module):
+    """Kipf-style graph convolution: H' = A_norm @ linear(H)"""
+
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+        # x: (B, N, in_features)  adj: (N, N)
+        return adj.unsqueeze(0) @ self.linear(x)  # (B, N, out_features)
+
+
+class BandGraphCNN(nn.Module):
+    """BandSpatialCNN band-temporal stage + two-layer GCN spatial refinement.
+
+    Electrode graph is built from channel_62_pos.locs (fixed at construction).
+    Input: (B, 62, 5)
+    """
+
+    def __init__(
+        self,
+        F: int = 16,
+        graph_hidden: int = 128,
+        graph_out: int = 64,
+        num_classes: int = 5,
+        adj_threshold: float = 0.35,
+    ):
+        super().__init__()
+        band_feat = 3 * F * 5  # features per node after band stage
+
+        # Band-temporal branches (identical to BandSpatialCNN)
+        self.band1 = nn.Conv2d(1, F, kernel_size=(1, 1))
+        self.band2 = nn.Conv2d(1, F, kernel_size=(1, 2))
+        self.band3 = nn.Conv2d(1, F, kernel_size=(1, 3), padding=(0, 1))
+        self.band_bn = nn.BatchNorm2d(3 * F)
+
+        # Graph convolution layers
+        self.gc1 = GraphConv(band_feat, graph_hidden)
+        self.ln1 = nn.LayerNorm(graph_hidden)
+        self.gc2 = GraphConv(graph_hidden, graph_out)
+        self.ln2 = nn.LayerNorm(graph_out)
+
+        self.head = nn.Linear(graph_out, num_classes)
+        self.register_buffer("adj", _build_adjacency(adj_threshold))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 62, 5)
+        B = x.size(0)
+        x = x.unsqueeze(1)  # (B, 1, 62, 5)
+
+        # Band stage — multi-scale frequency features per electrode
+        b1 = self.band1(x)                      # (B, F, 62, 5)
+        b2 = self.band2(F.pad(x, (0, 1)))       # (B, F, 62, 5)
+        b3 = self.band3(x)                      # (B, F, 62, 5)
+        x = torch.cat([b1, b2, b3], dim=1)      # (B, 3F, 62, 5)
+        x = F.leaky_relu(self.band_bn(x))
+
+        # (B, 3F, 62, 5) → (B, 62, 3F*5): each node owns its band features
+        x = x.permute(0, 2, 1, 3).reshape(B, 62, -1)
+
+        # Graph convolutions over electrode topology
+        x = F.leaky_relu(self.ln1(self.gc1(x, self.adj)))  # (B, 62, graph_hidden)
+        x = F.leaky_relu(self.ln2(self.gc2(x, self.adj)))  # (B, 62, graph_out)
+
+        return self.head(x.mean(dim=1))  # global mean pool → (B, num_classes)

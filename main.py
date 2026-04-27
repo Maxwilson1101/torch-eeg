@@ -4,6 +4,7 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -13,10 +14,11 @@ from sklearn.metrics import f1_score as sklearn_f1
 from tqdm import tqdm
 
 from dataloader import EEGDataset
-from models import BandSpatialCNN, TopoCNN, FactorizedCNN
+from models import BandSpatialCNN, TopoCNN, FactorizedCNN, BandGraphCNN
 
 DATA_DIR = Path("data")
 LOG_DIR = Path("logs")
+OUT_DIR = Path("outputs")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,7 @@ LABEL_SMOOTHING = 0.1
 EPOCHS = 2
 BATCH_SIZE = 32
 
-MODEL_CHOICES = ["mlp", "band", "topo", "factorized"]
+MODEL_CHOICES = ["mlp", "band", "topo", "factorized", "band_graph"]
 MODE_CHOICES = ["per-subject", "loocv"]
 
 
@@ -46,6 +48,8 @@ def build_model(name: str) -> nn.Module:
         return TopoCNN()
     if name == "factorized":
         return FactorizedCNN()
+    if name == "band_graph":
+        return BandGraphCNN()
     raise ValueError(f"Unknown model: {name}")
 
 
@@ -101,6 +105,31 @@ def evaluate(
     return total_loss / size, total_acc / size, f1
 
 
+@torch.no_grad()
+def collect_outputs(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device = DEVICE,
+):
+    model.eval()
+    all_X, all_preds, all_labels = [], [], []
+    for X, y in loader:
+        X, y = X.to(device), y.to(device)
+        preds = model(X).argmax(dim=1)
+        all_X.append(X.cpu())
+        all_preds.append(preds.cpu())
+        all_labels.append(y.cpu())
+    X_np = torch.cat(all_X).numpy()        # (N, 62, 5)
+    preds_np = torch.cat(all_preds).numpy()
+    labels_np = torch.cat(all_labels).numpy()
+    mean_de = np.stack([
+        X_np[labels_np == c].mean(axis=0) if (labels_np == c).any()
+        else np.zeros((62, 5), dtype=np.float32)
+        for c in range(5)
+    ])  # (5, 62, 5): class, channel, band
+    return mean_de, preds_np, labels_np
+
+
 def run_per_subject(
     all_files: list,
     model_name: str,
@@ -133,6 +162,12 @@ def run_per_subject(
                 "Epoch %d: train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f",
                 epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
             )
+
+        mean_de, preds, labels = collect_outputs(model, test_loader)
+        out_path = OUT_DIR / "per_subject" / f"{f.stem}.npz"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(out_path, mean_de=mean_de, preds=preds, labels=labels,
+                 acc=v_acc, f1=v_f1)
 
         subj_accs.append(v_acc)
         subj_f1s.append(v_f1)
@@ -185,6 +220,12 @@ def run_loocv(
                 "val_loss=%.4f val_acc=%.4f val_f1=%.4f",
                 i, epoch, t_loss, t_acc, v_loss, v_acc, v_f1,
             )
+
+        mean_de, preds, labels = collect_outputs(model, test_loader)
+        out_path = OUT_DIR / "loocv" / f"fold_{test_file.stem}.npz"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(out_path, mean_de=mean_de, preds=preds, labels=labels,
+                 acc=v_acc, f1=v_f1)
 
         loocv_accs.append(v_acc)
         loocv_f1s.append(v_f1)
